@@ -1,0 +1,33 @@
+{
+  "name": "total-excel-ai",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Total Constructors — AI Daily Purchase Sheet Generator (Next.js + Gemini + Python/openpyxl on Vercel)",
+  "scripts": {
+    "dev": "next dev",
+    "dev:py": "python3 api/export.py",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "test:py": "python3 tests/test_export.py"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@google/genai": "^1.52.0",
+    "lucide-react": "^0.577.0",
+    "next": "^15.5.29",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "server-only": "^0.0.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.5",
+    "@types/node": "^22.20.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "tailwindcss": "^4.3.5",
+    "typescript": "^5.9.3"
+  }
+}

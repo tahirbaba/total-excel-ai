@@ -1,0 +1,32 @@
+# dependencies
+node_modules/
+.pnp*
+
+# next.js / build
+.next/
+out/
+build/
+*.tsbuildinfo
+next-env.d.ts
+
+# env files (never commit secrets)
+.env*
+!.env.example
+
+# vercel
+.vercel/
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# generated spreadsheets / test outputs
+*.xlsx
+*.xls
+
+# misc
+.DS_Store
+npm-debug.log*
+*.log
