@@ -219,7 +219,7 @@ export default function InputDashboard(p: Props) {
       <button type="button" className="btn btn-primary w-full py-3 text-base" disabled={!canExtract} onClick={p.onExtract}>
         {p.loading ? (
           <>
-            <Loader2 className="h-5 w-5 animate-spin" /> Reading messages & slips…
+            <Loader2 className="h-5 w-5 animate-spin" /> Reading messages & slips… (can take up to a minute)
           </>
         ) : (
           <>

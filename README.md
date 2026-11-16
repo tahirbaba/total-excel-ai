@@ -6,7 +6,7 @@ Turns raw WhatsApp messages (Roman Urdu / English / mixed), vendor-slip photos a
 | Layer | Tech |
 |---|---|
 | UI | Next.js 15 (App Router, TypeScript), Tailwind CSS 4, lucide-react |
-| AI | `@google/genai` → `gemini-2.5-flash` with structured JSON output (`/api/extract`, `/api/fix`) |
+| AI | `@google/genai` → `gemini-3.5-flash` (auto-fallback to `gemini-3.8-flash` / `gemini-flash-latest`) with structured JSON output (`/api/extract`, `/api/fix`) |
 | Auth | 4-digit PIN (`/api/auth`) checked server-side on every API call |
 | Excel | Python serverless function `api/export.py` (openpyxl, stdlib `BaseHTTPRequestHandler`) |
 | Hosting | Vercel free tier (zero config — just import the repo) |
@@ -43,3 +43,6 @@ npm run test:py              # Excel generator unit test (needs: pip install ope
 | `GEMINI_API_KEY` | Google AI Studio key (free) |
 | `APP_PIN` | 4-digit PIN to unlock the app |
 | `NEXT_PUBLIC_APP_NAME` | Optional display name |
+| `GEMINI_MODEL` | Optional model override |
+
+> Note: Google no longer serves `gemini-2.5-flash` to new API keys, so the app uses the Gemini 3.x Flash family.

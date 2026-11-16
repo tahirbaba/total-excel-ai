@@ -1,7 +1,9 @@
 import "server-only";
-import { GoogleGenAI, Type, type Schema } from "@google/genai";
+import { GoogleGenAI, Type, type GenerateContentParameters, type Schema } from "@google/genai";
 
-export const MODEL = "gemini-2.5-flash";
+export const MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash";
+// Tried in order when the primary model is overloaded / rate-limited / unavailable.
+const FALLBACK_MODELS = ["gemini-3.8-flash", "gemini-flash-latest"];
 
 let client: GoogleGenAI | null = null;
 export function getClient() {
@@ -99,4 +101,26 @@ export function aiErrorMessage(e: unknown): string {
   if (/RESOURCE_EXHAUSTED|429|quota/i.test(msg)) return "Gemini free quota reached for now. Please wait a minute and try again.";
   if (/UNAVAILABLE|503|overloaded/i.test(msg)) return "Gemini is busy right now. Please try again in a few seconds.";
   return msg.length > 300 ? msg.slice(0, 300) + "…" : msg;
+}
+
+
+const isRetryable = (e: unknown) =>
+  /UNAVAILABLE|503|overloaded|high demand|RESOURCE_EXHAUSTED|429|NOT_FOUND|404|no longer available|INTERNAL|500/i.test(
+    e instanceof Error ? e.message : String(e),
+  );
+
+/** generateContent with automatic fallback to other Flash models on overload/quota errors. */
+export async function generate(params: Omit<GenerateContentParameters, "model">) {
+  const models = Array.from(new Set([MODEL, ...FALLBACK_MODELS]));
+  let lastErr: unknown;
+  for (const model of models) {
+    try {
+      return await getClient().models.generateContent({ ...params, model });
+    } catch (e) {
+      lastErr = e;
+      console.warn(`Gemini model ${model} failed, trying next`, e instanceof Error ? e.message.slice(0, 200) : e);
+      if (!isRetryable(e)) break;
+    }
+  }
+  throw lastErr;
 }

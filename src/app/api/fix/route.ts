@@ -1,9 +1,9 @@
 import { requirePin } from "@/lib/server/auth";
-import { DOMAIN_RULES, MODEL, SHEET_SCHEMA, aiErrorMessage, getClient, parseModelJSON } from "@/lib/server/gemini";
+import { DOMAIN_RULES, SHEET_SCHEMA, aiErrorMessage, generate, parseModelJSON } from "@/lib/server/gemini";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 const FIX_RULES = `${DOMAIN_RULES}
 
@@ -32,8 +32,7 @@ export async function POST(req: Request) {
   if (!body.sheet) return Response.json({ error: "Nothing to correct yet." }, { status: 400 });
 
   try {
-    const res = await getClient().models.generateContent({
-      model: MODEL,
+    const res = await generate({
       contents: [
         {
           role: "user",
