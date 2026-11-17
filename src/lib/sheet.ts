@@ -66,7 +66,7 @@ export function dehydrate(sheet: Sheet): RawSheet {
     date: sheet.date,
     sites: sheet.sites.map((s) => ({
       site_name: s.site_name.trim().toUpperCase(),
-      items: s.items.map(({ id: _id, ...rest }) => ({
+      items: s.items.map(({ id: _id, fromExisting: _fe, ...rest }) => ({
         ...rest,
         needs_review: rest.rate === null,
       })),
@@ -106,4 +106,26 @@ export function isoToDMY(iso: string) {
 export function dmyToISO(dmy: string) {
   const [d, m, y] = dmy.split("/");
   return y && m && d ? `${y}-${m}-${d}` : todayISO();
+}
+
+/** Merge `extra` into `base`: items go into the site with the same name, unknown sites are appended. */
+export function mergeSheets(base: Sheet, extra: Sheet): Sheet {
+  const key = (n: string) => n.replace(/[^a-z0-9]/gi, "").toUpperCase();
+  const sites = base.sites.map((s) => ({ ...s, items: [...s.items] }));
+  for (const s of extra.sites) {
+    const hit = sites.find((x) => key(x.site_name) === key(s.site_name));
+    if (hit) hit.items.push(...s.items);
+    else sites.push({ ...s, items: [...s.items] });
+  }
+  return { date: extra.date || base.date, sites };
+}
+
+export const defaultFileName = (dmy: string) => `Daily_Purchase_Sheet_${dmy.replace(/\//g, "-")}`;
+
+export const countItems = (s: Sheet) => s.sites.reduce((n, x) => n + x.items.length, 0);
+
+/** Map loosely-typed site names ("Brent wood", "grove residency") onto known sites. */
+export function canonicalSite(name: string, known: string[]): string {
+  const k = name.replace(/[^a-z0-9]/gi, "").toUpperCase();
+  return known.find((s) => s.replace(/[^a-z0-9]/gi, "").toUpperCase() === k) ?? name.trim().toUpperCase();
 }

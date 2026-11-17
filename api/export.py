@@ -23,7 +23,9 @@ import io
 import json
 import os
 import re
+import zipfile
 from http.server import BaseHTTPRequestHandler
+from urllib.parse import parse_qs, quote
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -100,70 +102,135 @@ def normalize_sheet(raw):
 
 # --------------------------------------------------------------------------- merge mode
 
+HEADER_ALIASES = {
+    "material": ("material", "materials", "item", "items", "description", "particulars"),
+    "vendor": ("vendor", "supplier", "party", "shop"),
+    "uom": ("uom", "unit", "units", "u.o.m", "u/m"),
+    "qty": ("qty", "quantity", "qty.", "nos"),
+    "rate": ("rate", "price", "unit price", "rate/unit"),
+    "cash": ("cash",),
+    "credit": ("credit", "udhaar", "udhar"),
+    "total": ("total", "amount", "amt"),
+    "remarks": ("remarks", "remark", "note", "notes", "comments"),
+}
+DATE_RE = re.compile(r"(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})")
+
+
+def _norm_header(v):
+    return re.sub(r"\s+", " ", _text(v).lower()).strip(" :")
+
+
+def _header_map(ws, r):
+    """If row r is a column-header row, return {field: column}, else None."""
+    cmap = {}
+    for c in range(1, min(ws.max_column, 30) + 1):
+        h = _norm_header(ws.cell(r, c).value)
+        if not h:
+            continue
+        for field, names in HEADER_ALIASES.items():
+            if field not in cmap and h in names:
+                cmap[field] = c
+                break
+    if "material" in cmap and ("qty" in cmap or "rate" in cmap):
+        return cmap
+    return None
+
+
+def _row_texts(ws, r):
+    return [(c, _text(ws.cell(r, c).value)) for c in range(1, min(ws.max_column, 30) + 1) if _text(ws.cell(r, c).value)]
+
+
+def _find_date(ws):
+    for r in range(1, min(ws.max_row, 6) + 1):
+        for c in range(1, min(ws.max_column, 12) + 1):
+            v = ws.cell(r, c).value
+            if hasattr(v, "strftime"):
+                return v.strftime("%d/%m/%Y")
+            m = DATE_RE.search(_text(v))
+            if m:
+                d, mo, y = m.groups()
+                y = ("20" + y) if len(y) == 2 else y
+                return f"{int(d):02d}/{int(mo):02d}/{y}"
+    return ""
+
+
 def parse_existing(xlsx_bytes):
-    """Read site blocks back out of a previously generated sheet."""
-    wb = load_workbook(io.BytesIO(xlsx_bytes), data_only=False)
-    ws = wb.active
-    date = ""
-    first = _text(ws.cell(1, 1).value)
-    m = re.search(r"(\d{1,2}/\d{1,2}/\d{4})", first)
-    if m:
-        date = m.group(1)
+    """Read site blocks out of an existing purchase sheet.
+
+    Works with sheets made by this app and with hand-made sheets in the same
+    style: columns are located by their header names (Material, Vendor, Uom,
+    Qty, Rate, Cash, Credit, Total, Remarks), the site name is the banner text
+    just above each header row, and a block ends at its TOTAL row.
+    """
+    wb_f = load_workbook(io.BytesIO(xlsx_bytes), data_only=False)
+    wb_v = load_workbook(io.BytesIO(xlsx_bytes), data_only=True)
+    ws, wsv = wb_f.active, wb_v.active
+    date = _find_date(ws)
 
     sites = []
-    current = None
-    max_row = ws.max_row
-    r = 1
-    while r <= max_row:
-        a = ws.cell(r, 1).value
-        a_txt = _text(a)
-        next_a = _text(ws.cell(r + 1, 1).value) if r < max_row else ""
-        rest_empty = all(ws.cell(r, c).value in (None, "") for c in range(2, 10))
-
-        # Site banner: text in A only, followed by the column header row.
-        if a_txt and rest_empty and next_a.lower() == "material":
-            current = {"site_name": a_txt.upper(), "items": []}
+    current, cmap = None, None
+    for r in range(1, ws.max_row + 1):
+        hm = _header_map(ws, r)
+        if hm:
+            # Site name = nearest row above with a single short text (the banner)
+            name = ""
+            for up in range(r - 1, max(r - 4, 0), -1):
+                texts = _row_texts(ws, up)
+                if len(texts) == 1 and not DATE_RE.search(texts[0][1]) and "PURCHASE SHEET" not in texts[0][1].upper():
+                    name = texts[0][1]
+                    break
+                if texts:
+                    break
+            current = {"site_name": (name or "UNASSIGNED SITE").upper(), "items": []}
             sites.append(current)
-            r += 2
+            cmap = hm
+            continue
+        if current is None:
             continue
 
-        e_txt = _text(ws.cell(r, 5).value).upper()
-        if e_txt in ("TOTAL", "GRAND TOTAL") or a_txt.upper() == "GRAND TOTAL":
-            current = None
-            r += 1
+        texts = _row_texts(ws, r)
+        if not texts:
+            continue
+        if any(t.strip().upper() in ("TOTAL", "GRAND TOTAL", "SITE TOTAL", "TOTAL:") for _, t in texts):
+            current, cmap = None, None
             continue
 
-        if current is not None and (a_txt or ws.cell(r, 4).value not in (None, "")):
-            qty = _num(ws.cell(r, 4).value)
-            rate = _num(ws.cell(r, 5).value)
-            f_val = ws.cell(r, 6).value
-            g_val = ws.cell(r, 7).value
-            if f_val not in (None, ""):
-                payment = "Cash"
-                amount = f_val
-            elif g_val not in (None, ""):
-                payment = "Credit"
-                amount = g_val
-            else:
-                payment, amount = "Credit", None
-            # Manually typed amount without a rate -> derive the rate.
-            if rate is None and qty and not (isinstance(amount, str) and amount.startswith("=")):
-                amt = _num(amount)
-                if amt:
-                    rate = _num(amt / qty)
-            current["items"].append(
-                {
-                    "material": a_txt,
-                    "vendor": _text(ws.cell(r, 2).value),
-                    "uom": _text(ws.cell(r, 3).value),
-                    "qty": qty,
-                    "rate": rate,
-                    "payment_type": payment,
-                    "remarks": _text(ws.cell(r, 9).value),
-                }
-            )
-        r += 1
+        def raw(field):
+            c = cmap.get(field)
+            return ws.cell(r, c).value if c else None
 
+        def val(field):
+            c = cmap.get(field)
+            return wsv.cell(r, c).value if c else None
+
+        material = _text(raw("material"))
+        qty = _num(val("qty") if val("qty") is not None else raw("qty"))
+        if not material and qty is None:
+            continue
+        rate = _num(val("rate") if val("rate") is not None else raw("rate"))
+        cash_raw, credit_raw = raw("cash"), raw("credit")
+        if cash_raw not in (None, ""):
+            payment, amount = "Cash", _num(val("cash"))
+        elif credit_raw not in (None, ""):
+            payment, amount = "Credit", _num(val("credit"))
+        else:
+            payment, amount = "Credit", None
+        # Amount typed by hand without a rate -> derive the per-unit rate.
+        if rate is None and qty and amount:
+            rate = _num(round(amount / qty, 2))
+        current["items"].append(
+            {
+                "material": material,
+                "vendor": _text(raw("vendor")),
+                "uom": _text(raw("uom")),
+                "qty": qty,
+                "rate": rate if rate else None,
+                "payment_type": payment,
+                "remarks": _text(raw("remarks")),
+            }
+        )
+
+    sites = [s for s in sites if s["items"]]
     return {"date": date, "sites": sites}
 
 
@@ -219,6 +286,8 @@ def build_workbook(sheet):
 
     r = 3  # row 2 is left blank
     site_total_rows = []
+    cached = {}  # cell ref -> computed value, stored next to each formula
+    site_sums = []
 
     for site in sheet["sites"]:
         items = [i for i in site["items"] if i["material"] or i["qty"] is not None]
@@ -249,6 +318,7 @@ def build_workbook(sheet):
         r += 1
 
         start = r
+        s_cash = s_credit = 0
         for it in items:
             ws.cell(r, 1, it["material"])
             ws.cell(r, 2, it["vendor"] or None)
@@ -256,11 +326,17 @@ def build_workbook(sheet):
             ws.cell(r, 4, it["qty"])
             if it["rate"] is not None:
                 ws.cell(r, 5, it["rate"])
+                amt = _num((it["qty"] or 0) * it["rate"]) or 0
                 if it["payment_type"] == "Cash":
                     ws.cell(r, 6, f"=D{r}*E{r}")
+                    cached[f"F{r}"] = amt
+                    s_cash += amt
                 else:
                     ws.cell(r, 7, f"=D{r}*E{r}")
+                    cached[f"G{r}"] = amt
+                    s_credit += amt
                 ws.cell(r, 8, f"=SUM(F{r}:G{r})")
+                cached[f"H{r}"] = amt
             ws.cell(r, 9, it["remarks"] or None)
             _style_row(ws, r)
             ws.cell(r, 3).alignment = CENTER
@@ -272,6 +348,8 @@ def build_workbook(sheet):
         ws.cell(r, 6, f"=SUM(F{start}:F{end})")
         ws.cell(r, 7, f"=SUM(G{start}:G{end})")
         ws.cell(r, 8, f"=SUM(H{start}:H{end})")
+        cached[f"F{r}"], cached[f"G{r}"], cached[f"H{r}"] = s_cash, s_credit, s_cash + s_credit
+        site_sums.append((s_cash, s_credit))
         _style_row(ws, r, fill=FILL_TOTAL, font=BOLD, border=Border(left=GRID, right=GRID, top=THIN, bottom=DOUBLE))
         ws.cell(r, 5).alignment = CENTER
         site_total_rows.append(r)
@@ -284,6 +362,9 @@ def build_workbook(sheet):
         ws.cell(r, 6, f"=SUM({refs('F')})")
         ws.cell(r, 7, f"=SUM({refs('G')})")
         ws.cell(r, 8, f"=SUM({refs('H')})")
+        g_cash = sum(c for c, _ in site_sums)
+        g_credit = sum(c for _, c in site_sums)
+        cached[f"F{r}"], cached[f"G{r}"], cached[f"H{r}"] = g_cash, g_credit, g_cash + g_credit
         _style_row(ws, r, fill=FILL_GRAND, font=Font(bold=True, size=12), border=Border(left=THIN, right=THIN, top=THIN, bottom=DOUBLE))
         ws.row_dimensions[r].height = 20
 
@@ -294,9 +375,50 @@ def build_workbook(sheet):
     ws.sheet_properties.pageSetUpPr.fitToPage = True
     ws.print_options.horizontalCentered = True
 
+    wb.properties.creator = "Total Constructors"
+    wb.properties.title = TITLE
     buf = io.BytesIO()
     wb.save(buf)
-    return buf.getvalue()
+    return _inject_cached_values(buf.getvalue(), cached)
+
+
+def _fmt_num(v):
+    v = _num(v) or 0
+    return str(int(v)) if float(v).is_integer() else repr(float(v))
+
+
+def _inject_cached_values(xlsx, cached):
+    """openpyxl writes formulas with an empty <v></v>. Excel recalculates them,
+    but mobile viewers (WhatsApp / iOS Files / Google preview / some Android
+    apps) only show the stored value, so totals looked blank or the file looked
+    broken. We store the computed result next to every formula we wrote."""
+    src = zipfile.ZipFile(io.BytesIO(xlsx))
+    out = io.BytesIO()
+    pattern = re.compile(r'<c r="([A-Z]+[0-9]+)"([^>]*)><f>([^<]*)</f><v\s*/?>(?:</v>)?</c>')
+
+    def fill(m):
+        ref, attrs, formula = m.group(1), m.group(2), m.group(3)
+        attrs = re.sub(r'\s+t="[^"]*"', "", attrs)
+        if ref in cached:
+            return f'<c r="{ref}"{attrs}><f>{formula}</f><v>{_fmt_num(cached[ref])}</v></c>'
+        return f'<c r="{ref}"{attrs}><f>{formula}</f></c>'
+
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+        for info in src.infolist():
+            data = src.read(info.filename)
+            if info.filename.startswith("xl/worksheets/sheet") and info.filename.endswith(".xml"):
+                data = pattern.sub(fill, data.decode("utf-8")).encode("utf-8")
+            dst.writestr(info, data)
+    return out.getvalue()
+
+
+def safe_filename(name, date):
+    base = _text(name)
+    base = re.sub(r"\.xlsx?$", "", base, flags=re.I)
+    base = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', "", base).strip(" .")[:120]
+    if not base:
+        base = "Daily_Purchase_Sheet_" + (re.sub(r"[^0-9]+", "-", date).strip("-") or "sheet")
+    return base + ".xlsx"
 
 
 def generate(payload):
@@ -314,8 +436,7 @@ def generate(payload):
     if not sheet["date"]:
         sheet["date"] = ""
     data = build_workbook(sheet)
-    safe_date = re.sub(r"[^0-9]+", "-", sheet["date"]).strip("-") or "sheet"
-    return data, f"Daily_Purchase_Sheet_{safe_date}.xlsx"
+    return data, safe_filename(payload.get("filename"), sheet["date"])
 
 
 # --------------------------------------------------------------------------- HTTP handler
@@ -333,10 +454,6 @@ class handler(BaseHTTPRequestHandler):  # Vercel looks for a class named `handle
         self._json(200, {"ok": True, "service": "excel-export"})
 
     def do_POST(self):
-        expected = os.environ.get("APP_PIN", "")
-        if expected and not hmac.compare_digest(self.headers.get("x-app-pin", ""), expected):
-            return self._json(401, {"error": "Session expired or wrong PIN. Please reload and enter the PIN again."})
-
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
@@ -344,8 +461,35 @@ class handler(BaseHTTPRequestHandler):  # Vercel looks for a class named `handle
         if length <= 0 or length > MAX_BODY:
             return self._json(413 if length > MAX_BODY else 400, {"error": "Invalid or too large request."})
 
+        raw = self.rfile.read(length)
+        pin = self.headers.get("x-app-pin", "")
+        is_form = "application/x-www-form-urlencoded" in (self.headers.get("Content-Type") or "")
         try:
-            payload = json.loads(self.rfile.read(length))
+            if is_form:
+                # Plain HTML form POST: the browser's own download manager saves the
+                # file. Most reliable path on phones and in-app (WhatsApp) browsers.
+                form = parse_qs(raw.decode("utf-8"))
+                pin = (form.get("pin") or [""])[0]
+                payload = json.loads((form.get("payload") or ["{}"])[0])
+            else:
+                payload = json.loads(raw)
+        except Exception:  # noqa: BLE001
+            return self._json(400, {"error": "Invalid request body."})
+
+        expected = os.environ.get("APP_PIN", "")
+        if expected and not hmac.compare_digest(pin.encode(), expected.encode()):
+            return self._json(401, {"error": "Session expired or wrong PIN. Please reload and enter the PIN again."})
+
+        if payload.get("action") == "parse":
+            try:
+                b64 = _text(payload.get("existing_file"))
+                if "," in b64[:100]:
+                    b64 = b64.split(",", 1)[1]
+                return self._json(200, parse_existing(base64.b64decode(b64)))
+            except Exception as exc:  # noqa: BLE001
+                return self._json(400, {"error": f"Could not read this .xlsx file: {exc}"})
+
+        try:
             data, filename = generate(payload)
         except ValueError as exc:
             return self._json(400, {"error": str(exc)})
@@ -354,7 +498,11 @@ class handler(BaseHTTPRequestHandler):  # Vercel looks for a class named `handle
 
         self.send_response(200)
         self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        ascii_name = filename.encode("ascii", "ignore").decode() or "Daily_Purchase_Sheet.xlsx"
+        self.send_header(
+            "Content-Disposition",
+            f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename)}",
+        )
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()

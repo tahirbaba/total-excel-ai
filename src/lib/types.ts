@@ -10,6 +10,8 @@ export interface Item {
   payment_type: PaymentType;
   remarks: string;
   needs_review: boolean;
+  /** Row came from an uploaded earlier sheet (client-only flag). */
+  fromExisting?: boolean;
 }
 
 export interface Site {
@@ -24,7 +26,7 @@ export interface Sheet {
 }
 
 /** Shape exchanged with the AI / Python endpoints (no client ids). */
-export type RawItem = Omit<Item, "id">;
+export type RawItem = Omit<Item, "id" | "fromExisting">;
 export interface RawSite {
   site_name: string;
   items: RawItem[];
@@ -38,4 +40,9 @@ export interface UploadFile {
   name: string;
   mimeType: string;
   data: string; // base64 (no data: prefix)
+}
+
+export interface ExportedFile {
+  blob: Blob;
+  name: string;
 }

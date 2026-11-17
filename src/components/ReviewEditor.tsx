@@ -5,15 +5,18 @@ import {
   ArrowLeft,
   CheckCircle2,
   Download,
+  FilePlus2,
   Loader2,
   Plus,
+  Share2,
+  Smartphone,
   Trash2,
   Wand2,
 } from "lucide-react";
 import { useState } from "react";
 import Combobox from "./Combobox";
 import { dmyToISO, emptyItem, emptySite, fmt, isRowInvalid, isRowMissingRate, isoToDMY, siteTotals } from "@/lib/sheet";
-import type { Item, PaymentType, Sheet, Site } from "@/lib/types";
+import type { ExportedFile, Item, PaymentType, Sheet, Site } from "@/lib/types";
 
 export interface OptionList {
   options: string[];
@@ -27,11 +30,22 @@ interface Props {
   sites: OptionList;
   vendors: OptionList;
   uoms: OptionList;
-  existingName?: string;
+  fileName: string;
+  setFileName: (v: string) => void;
   onBack: () => void;
   onFix: (instruction: string) => Promise<void>;
-  onExport: () => Promise<void>;
+  onExport: () => Promise<ExportedFile | null>;
+  onDirectDownload: () => void;
+  onStartNew: () => void;
 }
+
+const canShareFile = (f: File) => {
+  try {
+    return typeof navigator !== "undefined" && !!navigator.canShare && navigator.canShare({ files: [f] });
+  } catch {
+    return false;
+  }
+};
 
 const numOrNull = (v: string): number | null => {
   if (v.trim() === "") return null;
@@ -73,8 +87,13 @@ function ItemRow({
 
   return (
     <div className={`grid grid-cols-2 gap-2 rounded-lg border p-2 md:grid-cols-[2.2fr_1.4fr_0.9fr_0.8fr_0.9fr_1fr_1.4fr_auto] md:items-center md:gap-1.5 md:rounded-none md:border-x-0 md:border-t-0 md:p-1.5 ${tone}`}>
-      <label className="col-span-2 md:col-span-1">
+      <label className="relative col-span-2 md:col-span-1">
         <span className={lbl}>Material</span>
+        {item.fromExisting && (
+          <span className="absolute -top-2 right-1 z-10 rounded bg-emerald-600 px-1 text-[9px] font-bold uppercase tracking-wide text-white">
+            Earlier
+          </span>
+        )}
         <input
           className={`field ${!item.material.trim() ? "border-red-400" : ""}`}
           value={item.material}
@@ -279,6 +298,7 @@ export default function ReviewEditor(p: Props) {
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState("");
   const [done, setDone] = useState(false);
+  const [lastFile, setLastFile] = useState<File | null>(null);
 
   const allItems = p.sheet.sites.flatMap((s) => s.items);
   const invalidCount = allItems.filter(isRowInvalid).length;
@@ -317,7 +337,8 @@ export default function ReviewEditor(p: Props) {
     setError("");
     setDone(false);
     try {
-      await p.onExport();
+      const out = await p.onExport();
+      if (out) setLastFile(new File([out.blob], out.name, { type: out.blob.type }));
       setDone(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Excel download failed");
@@ -327,7 +348,7 @@ export default function ReviewEditor(p: Props) {
   };
 
   return (
-    <div className="space-y-4 pb-60 sm:pb-40">
+    <div className="space-y-4 pb-72 sm:pb-48">
       {/* Toolbar */}
       <div className="flex flex-wrap items-center gap-3">
         <button type="button" className="btn btn-ghost" onClick={p.onBack}>
@@ -349,9 +370,9 @@ export default function ReviewEditor(p: Props) {
         </div>
       </div>
 
-      {p.existingName && (
+      {p.sheet.sites.some((s) => s.items.some((i) => i.fromExisting)) && (
         <p className="rounded-lg border border-emerald-200 bg-emerald-50 p-2 text-sm text-emerald-800">
-          These items will be merged into <b>{p.existingName}</b> when you download.
+          Rows marked <b>EARLIER</b> came from your uploaded sheet — you can edit or delete them too.
         </p>
       )}
 
@@ -397,7 +418,7 @@ export default function ReviewEditor(p: Props) {
       <div className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-200 bg-white/95 shadow-[0_-4px_16px_rgba(0,0,0,0.06)] backdrop-blur">
         <div className="mx-auto max-w-7xl space-y-2 p-3">
           <form
-            className="flex flex-col gap-2 sm:flex-row"
+            className="flex gap-2"
             onSubmit={(e) => {
               e.preventDefault();
               runFix();
@@ -412,7 +433,8 @@ export default function ReviewEditor(p: Props) {
             />
             <button type="submit" className="btn btn-ghost shrink-0 text-brand-700" disabled={fixing || !instruction.trim()}>
               {fixing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
-              {fixing ? "Updating…" : "Update with AI"}
+              <span className="hidden sm:inline">{fixing ? "Updating…" : "Update with AI"}</span>
+              <span className="sm:hidden">{fixing ? "…" : "AI Fix"}</span>
             </button>
           </form>
 
@@ -442,11 +464,47 @@ export default function ReviewEditor(p: Props) {
                 </span>
               )}
             </div>
+            <label className="flex min-w-0 items-center rounded-lg border border-slate-300 bg-white focus-within:border-brand-500 focus-within:ring-2 focus-within:ring-brand-100 sm:w-72">
+              <span className="pl-2 text-xs font-semibold text-slate-500">Name</span>
+              <input
+                className="min-w-0 flex-1 bg-transparent px-2 py-2 text-sm outline-none"
+                value={p.fileName}
+                onChange={(e) => {
+                  p.setFileName(e.target.value.replace(/[\\/:*?"<>|]/g, ""));
+                  setLastFile(null);
+                }}
+                aria-label="Excel file name"
+                placeholder="File name"
+              />
+              <span className="pr-2 text-xs text-slate-400">.xlsx</span>
+            </label>
             <button type="button" className="btn btn-primary py-2.5" disabled={!canApprove} onClick={runExport}>
               {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
               Approve & Download Excel (.xlsx)
             </button>
           </div>
+
+          {done && (
+            <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-600">
+              <Smartphone className="h-4 w-4 shrink-0 text-slate-400" />
+              <span className="mr-auto">Phone pe nahi khuli?</span>
+              {lastFile && canShareFile(lastFile) && (
+                <button
+                  type="button"
+                  className="btn btn-ghost px-2.5 py-1 text-xs"
+                  onClick={() => navigator.share({ files: [lastFile], title: lastFile.name }).catch(() => {})}
+                >
+                  <Share2 className="h-3.5 w-3.5" /> Share / Open
+                </button>
+              )}
+              <button type="button" className="btn btn-ghost px-2.5 py-1 text-xs" onClick={p.onDirectDownload}>
+                <Download className="h-3.5 w-3.5" /> Direct download
+              </button>
+              <button type="button" className="btn btn-ghost px-2.5 py-1 text-xs" onClick={p.onStartNew}>
+                <FilePlus2 className="h-3.5 w-3.5" /> New sheet
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>

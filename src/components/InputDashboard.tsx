@@ -1,17 +1,21 @@
 "use client";
 
-import { FileSpreadsheet, FileText, ImageIcon, Loader2, Sparkles, Upload, X } from "lucide-react";
+import { CheckCircle2, FileSpreadsheet, FileText, FolderOpen, ImageIcon, Loader2, Sparkles, Upload, X } from "lucide-react";
 import { useRef, useState } from "react";
-import { b64Bytes, compressImage, fileToBase64 } from "@/lib/client";
-import type { PaymentType, UploadFile } from "@/lib/types";
+import { b64Bytes, compressImage, fileToBase64, loadList, postJSON } from "@/lib/client";
+import { DEFAULT_SITES, STORAGE_KEYS } from "@/lib/constants";
+import { canonicalSite, countItems, hydrate } from "@/lib/sheet";
+import type { PaymentType, Sheet, UploadFile } from "@/lib/types";
 
 const MAX_TOTAL_BYTES = 4 * 1024 * 1024; // Vercel request body limit is 4.5 MB
 const ACCEPT = "image/jpeg,image/png,image/webp,application/pdf";
 
 export interface ExistingSheet {
   name: string;
-  data: string; // base64
+  sheet: Sheet; // parsed contents, merged into the editor
 }
+
+const isXlsx = (f: File) => /\.xlsx$/i.test(f.name);
 
 interface Props {
   dateISO: string;
@@ -32,6 +36,9 @@ interface Props {
 export default function InputDashboard(p: Props) {
   const [processing, setProcessing] = useState(false);
   const [fileError, setFileError] = useState("");
+  const [xlsxBusy, setXlsxBusy] = useState(false);
+  const [xlsxError, setXlsxError] = useState("");
+  const [dragXlsx, setDragXlsx] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const xlsxRef = useRef<HTMLInputElement>(null);
 
@@ -44,6 +51,10 @@ export default function InputDashboard(p: Props) {
     const added: UploadFile[] = [];
     try {
       for (const f of Array.from(list)) {
+        if (isXlsx(f)) {
+          await addExisting(f); // an Excel file dropped here = "existing sheet"
+          continue;
+        }
         if (f.type.startsWith("image/")) {
           added.push({ name: f.name, mimeType: "image/jpeg", data: await compressImage(f) });
         } else if (f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf")) {
@@ -66,18 +77,43 @@ export default function InputDashboard(p: Props) {
     }
   };
 
-  const addExisting = async (f: File | undefined) => {
+  async function addExisting(f: File | undefined) {
     if (!f) return;
-    if (!f.name.toLowerCase().endsWith(".xlsx")) {
-      setFileError("Existing sheet must be an .xlsx file.");
+    setXlsxError("");
+    if (!isXlsx(f)) {
+      setXlsxError("Please choose an Excel .xlsx file (old .xls files: open in Excel and 'Save As' .xlsx first).");
       return;
     }
-    p.setExisting({ name: f.name, data: await fileToBase64(f) });
-    if (xlsxRef.current) xlsxRef.current.value = "";
-  };
+    if (f.size > 3 * 1024 * 1024) {
+      setXlsxError("This Excel file is too large (max 3 MB).");
+      return;
+    }
+    setXlsxBusy(true);
+    try {
+      const raw = await postJSON<unknown>("/api/export", { action: "parse", existing_file: await fileToBase64(f) });
+      const sheet = hydrate(raw, "", p.payment);
+      const known = [...DEFAULT_SITES, ...loadList(STORAGE_KEYS.sites)];
+      sheet.sites.forEach((s) => {
+        s.site_name = canonicalSite(s.site_name, known);
+        s.items.forEach((i) => (i.fromExisting = true));
+      });
+      if (countItems(sheet) === 0) {
+        throw new Error(
+          "No items found in this sheet. Make sure it has a header row with 'Material' and 'Qty' columns under each site name.",
+        );
+      }
+      p.setExisting({ name: f.name, sheet });
+    } catch (e) {
+      setXlsxError(e instanceof Error ? e.message : "Could not read this Excel file");
+    } finally {
+      setXlsxBusy(false);
+      if (xlsxRef.current) xlsxRef.current.value = "";
+    }
+  }
 
+  const hasNew = p.text.trim().length > 0 || p.files.length > 0;
   const canExtract =
-    !p.loading && !processing && (p.text.trim().length > 0 || p.files.length > 0) && totalBytes <= MAX_TOTAL_BYTES;
+    !p.loading && !processing && !xlsxBusy && (hasNew || !!p.existing) && totalBytes <= MAX_TOTAL_BYTES;
 
   return (
     <div className="space-y-4">
@@ -182,34 +218,76 @@ export default function InputDashboard(p: Props) {
 
       {/* Existing sheet */}
       <section className="card p-4">
-        <div className="flex flex-wrap items-center gap-3">
+        <div className="mb-2 flex items-center gap-2">
           <FileSpreadsheet className="h-5 w-5 text-emerald-600" />
-          <div className="min-w-0 flex-1">
-            <p className="text-sm font-semibold">Append to existing sheet (optional)</p>
-            <p className="text-xs text-slate-500">
-              Upload today&apos;s earlier .xlsx — new items will be merged into matching sites when you download.
-            </p>
-          </div>
-          {p.existing ? (
-            <span className="inline-flex items-center gap-2 rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">
-              {p.existing.name}
-              <button type="button" aria-label="Remove existing sheet" onClick={() => p.setExisting(null)}>
-                <X className="h-3.5 w-3.5" />
-              </button>
-            </span>
-          ) : (
-            <button type="button" className="btn btn-ghost" onClick={() => xlsxRef.current?.click()}>
-              <Upload className="h-4 w-4" /> Upload .xlsx
-            </button>
-          )}
-          <input
-            ref={xlsxRef}
-            type="file"
-            accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            className="hidden"
-            onChange={(e) => addExisting(e.target.files?.[0])}
-          />
+          <span className="text-sm font-semibold">Append to existing sheet (optional)</span>
         </div>
+        {p.existing ? (
+          <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+            <div className="flex items-start gap-2">
+              <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600" />
+              <div className="min-w-0 flex-1 text-sm">
+                <p className="truncate font-semibold text-emerald-900">{p.existing.name}</p>
+                <p className="text-emerald-800">
+                  {p.existing.sheet.sites.length} site(s), {countItems(p.existing.sheet)} item(s) found
+                  {p.existing.sheet.date && <> · dated {p.existing.sheet.date}</>}
+                </p>
+                <div className="mt-1.5 flex flex-wrap gap-1">
+                  {p.existing.sheet.sites.map((s) => (
+                    <span key={s.id} className="rounded-full bg-white px-2 py-0.5 text-[11px] font-medium text-emerald-800">
+                      {s.site_name} ({s.items.length})
+                    </span>
+                  ))}
+                </div>
+                <p className="mt-2 text-xs text-emerald-700">
+                  These rows will appear in the review screen (marked &ldquo;Earlier&rdquo;) and new items are added to
+                  matching sites.
+                </p>
+              </div>
+              <button
+                type="button"
+                aria-label="Remove existing sheet"
+                className="rounded p-1 text-emerald-700 hover:bg-emerald-100"
+                onClick={() => p.setExisting(null)}
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => xlsxRef.current?.click()}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setDragXlsx(true);
+            }}
+            onDragLeave={() => setDragXlsx(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragXlsx(false);
+              addExisting(e.dataTransfer.files?.[0]);
+            }}
+            disabled={xlsxBusy}
+            className={`flex w-full flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed px-4 py-5 text-sm transition ${
+              dragXlsx
+                ? "border-emerald-500 bg-emerald-50 text-emerald-700"
+                : "border-slate-300 bg-slate-50 text-slate-600 hover:border-emerald-500 hover:bg-emerald-50"
+            }`}
+          >
+            {xlsxBusy ? <Loader2 className="h-6 w-6 animate-spin" /> : <Upload className="h-6 w-6" />}
+            <span className="font-medium">{xlsxBusy ? "Reading sheet…" : "Tap to choose or drop today\u2019s earlier .xlsx"}</span>
+            <span className="text-xs text-slate-400">Its sites & items load into the editor so you can add to them</span>
+          </button>
+        )}
+        <input
+          ref={xlsxRef}
+          type="file"
+          accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+          className="hidden"
+          onChange={(e) => addExisting(e.target.files?.[0])}
+        />
+        {xlsxError && <p className="mt-2 text-sm text-red-600">{xlsxError}</p>}
       </section>
 
       {p.error && (
@@ -221,13 +299,17 @@ export default function InputDashboard(p: Props) {
           <>
             <Loader2 className="h-5 w-5 animate-spin" /> Reading messages & slips… (can take up to a minute)
           </>
-        ) : (
+        ) : hasNew ? (
           <>
             <Sparkles className="h-5 w-5" /> Extract & Preview
           </>
+        ) : (
+          <>
+            <FolderOpen className="h-5 w-5" /> Open Existing Sheet for Editing
+          </>
         )}
       </button>
-      {!p.text.trim() && p.files.length === 0 && (
+      {!hasNew && !p.existing && (
         <p className="flex items-center justify-center gap-1 text-center text-xs text-slate-500">
           <ImageIcon className="h-3.5 w-3.5" /> Paste a message or add at least one slip to start.
         </p>

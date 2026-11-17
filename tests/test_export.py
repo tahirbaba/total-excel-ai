@@ -86,6 +86,39 @@ def main():
         assert "AKD TOWER" in names and "Sand" in names and "GROVE RESIDENCY" in names
         scb_items = names[names.index("SCB OPS BUILDING") + 2: names.index("SCB OPS BUILDING") + 6]
         assert scb_items == ["Cement", "Carriage Warehouse to SCB", "Wall Putty", "Sand"], scb_items
+        # Cached values are stored next to formulas (mobile viewers show these)
+        wv = load_workbook(io.BytesIO(data), data_only=True).active
+        assert wv["G5"].value == 290000 and wv["H5"].value == 290000, wv["G5"].value
+        assert wv["F8"].value == 14000 and wv["H8"].value == 304000
+        assert wv["H15"].value == 304000 + 21250, wv["H15"].value
+        assert load_workbook(io.BytesIO(data)).active["H15"].value == "=SUM(H8,H13)"
+
+        # Custom file names
+        assert export.safe_filename("Grove bill / 17 Nov.xlsx", "17/11/2026") == "Grove bill  17 Nov.xlsx"
+        assert export.safe_filename("", "17/11/2026") == "Daily_Purchase_Sheet_17-11-2026.xlsx"
+        _, fname = export.generate({**MOCK, "filename": "My Sheet"})
+        assert fname == "My Sheet.xlsx"
+
+        # Hand-made sheet with different column order / header names
+        from openpyxl import Workbook
+        hw = Workbook()
+        hs = hw.active
+        hs.append(["Date: 15-11-2026", None, "DAILY PURCHASE SHEET - TOTAL CONSTRUCTORS"])
+        hs.append([])
+        hs.append(["Tabba Residency"])
+        hs.append(["S.No", "Description", "Supplier", "Unit", "Quantity", "Rate", "Cash", "Credit", "Amount", "Remarks"])
+        hs.append([1, "Sariya 12mm", "Ittefaq", "KG", 500, 280, None, "=E5*F5", "=H5", ""])
+        hs.append([2, "Bajri", None, "Titan", 1, None, 18000, None, 18000, "paid"])
+        hs.append([None, None, None, None, None, "TOTAL", 18000, 140000, 158000])
+        hb = io.BytesIO()
+        hw.save(hb)
+        parsed = export.parse_existing(hb.getvalue())
+        assert parsed["date"] == "15/11/2026", parsed["date"]
+        assert [x["site_name"] for x in parsed["sites"]] == ["TABBA RESIDENCY"], parsed
+        it = parsed["sites"][0]["items"]
+        assert (it[0]["material"], it[0]["vendor"], it[0]["qty"], it[0]["rate"], it[0]["payment_type"]) == ("Sariya 12mm", "Ittefaq", 500, 280, "Credit"), it[0]
+        assert (it[1]["material"], it[1]["rate"], it[1]["payment_type"]) == ("Bajri", 18000, "Cash"), it[1]
+
         print("OK: export.py generates valid .xlsx with formulas; merge mode works")
     finally:
         os.remove(path)

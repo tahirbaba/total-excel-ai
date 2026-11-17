@@ -113,13 +113,17 @@ const isRetryable = (e: unknown) =>
 export async function generate(params: Omit<GenerateContentParameters, "model">) {
   const models = Array.from(new Set([MODEL, ...FALLBACK_MODELS]));
   let lastErr: unknown;
-  for (const model of models) {
-    try {
-      return await getClient().models.generateContent({ ...params, model });
-    } catch (e) {
-      lastErr = e;
-      console.warn(`Gemini model ${model} failed, trying next`, e instanceof Error ? e.message.slice(0, 200) : e);
-      if (!isRetryable(e)) break;
+  // Two rounds: Google's "high demand" errors are usually gone within seconds.
+  for (let round = 0; round < 2; round++) {
+    if (round > 0) await new Promise((r) => setTimeout(r, 3000));
+    for (const model of models) {
+      try {
+        return await getClient().models.generateContent({ ...params, model });
+      } catch (e) {
+        lastErr = e;
+        console.warn(`Gemini model ${model} failed, trying next`, e instanceof Error ? e.message.slice(0, 200) : e);
+        if (!isRetryable(e)) throw e;
+      }
     }
   }
   throw lastErr;
